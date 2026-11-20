@@ -79,6 +79,7 @@ a{color:var(--acc)}
   <div id="ctrl">
     <button class="ib" id="bPause" title="Pause/resume">⏸</button>
     <button class="ib" id="bMute" title="Mute voice">🔊</button>
+    <button class="ib" id="bReplay" title="Replay">⟲</button>
     <button class="ib" id="bPdf" title="Export PDF">⤓</button>
     <span id="status">Ready</span>
   </div>
@@ -133,7 +134,7 @@ async function idbGet(k){try{const d=await idb();return await new Promise(r=>{co
 // ---------- State ----------
 const W=720; // board logical width
 let board=null; // {id,title,created,ops:[],history:[],defense}
-let queue=[]; // steps to play [{say,ops:[...]}]
+let queue=[];function enqueue(...st){queue.push(...st);if(board){board.steps=board.steps||[];board.steps.push(...JSON.parse(JSON.stringify(st)))}} // steps to play [{say,ops:[...]}]
 let playing=false,paused=false,muted=LS.get('muted',false),following=true;
 let cur=null; // {ops, idx, t}
 let camY=0,scale=1,offX=0,attach=null,defense=LS.get('defense',null),pdfData=null;
@@ -188,6 +189,10 @@ async function play(){if(playing)return;playing=true;$('#cap').style.display='bl
  while(queue.length){const s=queue.shift();$('#cap').textContent=s.say||'';await waitPause();
   await Promise.all([speak(s.say),animOps(s.ops||[])]);await waitPause();await sleep(250)}
  playing=false;$('#cap').style.display='none';$('#follow').style.display='none';setStatus('Done — ask a follow-up');saveBoard()}
+function replay(){if(!board||!board.ops.length)return setStatus('Nothing to replay yet');if(playing)return setStatus('Wait until it finishes, or tap ⏸');
+ const st=board.steps&&board.steps.length?board.steps:[{say:'',ops:board.ops.slice()}];board.ops=[];camY=0;following=true;paused=false;$('#bPause').textContent='⏸';$('#bPause').classList.remove('on');
+ queue=JSON.parse(JSON.stringify(st));setStatus('Replaying…');draw();play()}
+$('#bReplay').onclick=replay;
 $('#bPause').onclick=()=>{paused=!paused;$('#bPause').textContent=paused?'▶':'⏸';$('#bPause').classList.toggle('on',paused);if('speechSynthesis'in window)paused?speechSynthesis.pause():speechSynthesis.resume()};
 function setMute(){$('#bMute').textContent=muted?'🔇':'🔊';$('#bMute').classList.toggle('on',muted)}
 $('#bMute').onclick=()=>{muted=!muted;LS.set('muted',muted);setMute();if(muted&&'speechSynthesis'in window)speechSynthesis.cancel()};
@@ -235,10 +240,10 @@ async function ask(text,extra){if(playing){setStatus('Wait for the current expla
  const label=text||(attach?'[photo]':'');clearAttach();$('#empty').style.display='none';
  setStatus('Lycan is thinking…');$('#send').disabled=true;
  try{const off=board.ops.length?contentH()+70:30;
-  if(board.ops.length&&label&&!board.defense){queue.push({say:'',ops:[{t:'line',x1:40,y1:off-35,x2:690,y2:off-35,c:'#2e4d3f',w:2}]})}
-  if(board.ops.length&&label){queue.push({say:'',ops:[{t:'text',x:40,y:off,text:(board.defense?'You: ':'Q: ')+label.slice(0,140),size:22,c:'blue'}]})}
+  if(board.ops.length&&label&&!board.defense){enqueue({say:'',ops:[{t:'line',x1:40,y1:off-35,x2:690,y2:off-35,c:'#2e4d3f',w:2}]})}
+  if(board.ops.length&&label){enqueue({say:'',ops:[{t:'text',x:40,y:off,text:(board.defense?'You: ':'Q: ')+label.slice(0,140),size:22,c:'blue'}]})}
   const d=await askGemini(parts);if(!board.title||board.title==='New board')board.title=d.title||label.slice(0,40);
-  const base=off+(board.ops.length&&label?40:0);normalizeOps(d.steps,base);queue.push(...d.steps);setStatus('Explaining…');following=true;play()}
+  const base=off+(board.ops.length&&label?40:0);normalizeOps(d.steps,base);enqueue(...d.steps);setStatus('Explaining…');following=true;play()}
  catch(e){setStatus('⚠ '+e.message);console.error(e)}finally{$('#send').disabled=false}}
 
 // ---------- Boards ----------
@@ -248,11 +253,12 @@ function saveBoard(){if(!board||!board.ops.length)return;const all=LS.get('board
 function renderHist(){const all=Object.values(LS.get('boards',{})).sort((a,b)=>b.created-a.created);let last='',h='';
  if(!all.length)h='<small class="hint">No boards yet. They save automatically.</small>';
  for(const b of all){const d=new Date(b.created).toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'});if(d!==last){h+=`<div class="day">${d}</div>`;last=d}
-  h+=`<div class="item"><div class="t" data-o="${b.id}">${esc(b.title)}${b.defense?' 🎓':''}<small>${new Date(b.created).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</small></div><button class="ib" data-d="${b.id}">🗑</button></div>`}
+  h+=`<div class="item"><div class="t" data-o="${b.id}">${esc(b.title)}${b.defense?' 🎓':''}<small>${new Date(b.created).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</small></div><button class="ib" data-r="${b.id}" title="Replay">▶</button><button class="ib" data-d="${b.id}">🗑</button></div>`}
  $('#hist').innerHTML=h}
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-$('#hist').onclick=e=>{const o=e.target.closest('[data-o]'),d=e.target.closest('[data-d]');const all=LS.get('boards',{});
+$('#hist').onclick=e=>{const o=e.target.closest('[data-o]'),d=e.target.closest('[data-d]'),rp=e.target.closest('[data-r]');const all=LS.get('boards',{});
  if(d){delete all[d.dataset.d];LS.set('boards',all);renderHist()}
+ if(rp&&!playing){board=all[rp.dataset.r];$('#empty').style.display='none';setDefBadge();closeSheets();replay();return}
  if(o&&!playing){board=all[o.dataset.o];camY=0;$('#empty').style.display='none';setDefBadge();closeSheets();draw();setStatus('Opened — ask a follow-up')}};
 
 // ---------- PDF export ----------
