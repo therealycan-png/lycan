@@ -10,6 +10,7 @@
 <link rel="apple-touch-icon" href="icon-512.png">
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@500;700&family=Inter:wght@400;600&display=swap" rel="stylesheet">
 <script src="jspdf.umd.min.js"></script>
+<script src="pdf.min.js"></script>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
 :root{--bg:#14241d;--board:#1f3a2e;--chalk:#f4f1e6;--ink:#e8e4d6;--muted:#9fb3a8;--acc:#f2c14e;--panel:#0f1c16;--line:#2e4d3f;--red:#ef7a6a}
@@ -103,6 +104,14 @@ a{color:var(--acc)}
   <label>Gemini API key (free)</label>
   <input id="key" type="password" placeholder="Paste your key">
   <small class="hint">Get one free at <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a> → "Create API key". It stays only on this phone.</small>
+  <label>Backup AI providers (free) — used automatically when Gemini runs out</label>
+  <input id="k_groq" type="password" placeholder="Groq key (console.groq.com/keys)">
+  <input id="k_openrouter" type="password" placeholder="OpenRouter key (openrouter.ai/keys) — DeepSeek free" style="margin-top:6px">
+  <input id="k_cerebras" type="password" placeholder="Cerebras key (cloud.cerebras.ai)" style="margin-top:6px">
+  <small class="hint">Order: Gemini → Groq → OpenRouter (DeepSeek) → Cerebras. Photos, voice and PDFs work best on Gemini; backups read your paper as text.</small>
+  <label>Double-check answers before showing</label>
+  <select id="verify"><option value="0">Off (uses fewer requests)</option><option value="1">Check once</option><option value="2">Check up to 2 rounds</option><option value="3">Check up to 3 rounds</option></select>
+  <small class="hint">The AI re-solves the problem and fixes mistakes before drawing. Each round uses 1 extra request.</small>
   <label>Google Drive storage</label>
   <input id="cid" placeholder="Paste your Google OAuth Client ID (…apps.googleusercontent.com)">
   <small class="hint" id="gState"></small>
@@ -153,7 +162,7 @@ let board=null; // {id,title,created,ops:[],history:[],defense}
 let queue=[];function enqueue(...st){queue.push(...st);if(board){board.steps=board.steps||[];board.steps.push(...JSON.parse(JSON.stringify(st)))}} // steps to play [{say,ops:[...]}]
 let playing=false,paused=false,muted=LS.get('muted',false),following=true;
 let cur=null; // {ops, idx, t}
-let camY=0,scale=1,offX=0,attach=null,defense=LS.get('defense',null),pdfData=null;
+let pdfText='';let camY=0,scale=1,offX=0,attach=null,defense=LS.get('defense',null),pdfData=null;
 const cv=$('#cv'),wrap=$('#wrap');let ctx=cv.getContext('2d');
 
 function resize(){const r=wrap.getBoundingClientRect(),d=devicePixelRatio||1;cv.width=r.width*d;cv.height=r.height*d;cv.style.width=r.width+'px';cv.style.height=r.height+'px';scale=Math.min(r.width/W,Math.max(1,r.height/900));offX=(r.width-W*scale)/2;draw()}
@@ -204,7 +213,7 @@ async function animOps(ops){for(let i=0;i<ops.length;i++){cur={ops,idx:i,t:0};co
 async function play(){if(playing)return;playing=true;$('#cap').style.display='block';
  while(queue.length){const s=queue.shift();$('#cap').textContent=s.say||'';await waitPause();
   await Promise.all([speak(s.say),animOps(s.ops||[])]);await waitPause();await sleep(250)}
- playing=false;$('#cap').style.display='none';$('#follow').style.display='none';setStatus('Done — ask a follow-up');saveBoard()}
+ playing=false;$('#cap').style.display='none';$('#follow').style.display='none';setStatus('Done'+(lastProv?' · '+PROV[lastProv].label:'')+(checkNote?' · '+checkNote:'')+' — ask a follow-up');saveBoard()}
 function replay(){if(!board||!board.ops.length)return setStatus('Nothing to replay yet');if(playing)return setStatus('Wait until it finishes, or tap ⏸');
  const st=board.steps&&board.steps.length?board.steps:[{say:'',ops:board.ops.slice()}];board.ops=[];camY=0;following=true;paused=false;$('#bPause').textContent='⏸';$('#bPause').classList.remove('on');
  queue=JSON.parse(JSON.stringify(st));setStatus('Replaying…');draw();play()}
@@ -226,44 +235,81 @@ function defSys(){const lv=$('#strict').value||defense.level;return `\n\nDEFENSE
 // ---------- Usage tracker ----------
 function ptDay(){return new Date().toLocaleDateString('en-CA',{timeZone:'America/Los_Angeles'})} // Google free quota resets at midnight Pacific
 function usage(){const u=LS.get('usage',{});const d=ptDay();if(!u[d])u[d]={req:0,tok:0,lessons:0,hit:0};return{u,d}}
-function track(kind,n){const {u,d}=usage();const t=u[d];if(kind==='req')t.req++;if(kind==='tok')t.tok+=n||0;if(kind==='lesson')t.lessons++;if(kind==='hit'){t.hit++;const caps=LS.get('caps',[]);caps.push({day:d,req:Math.max(1,t.req-1),model:LS.get('model','')});LS.set('caps',caps.slice(-20))}
+function track(kind,n){const {u,d}=usage();const t=u[d];t.by=t.by||{};if(kind==='req'){t.req++;t.by[n||'gemini']=(t.by[n||'gemini']||0)+1}if(kind==='tok')t.tok+=n||0;if(kind==='lesson')t.lessons++;if(kind==='hit'&&n&&n!=='gemini'){t.hit++}else if(kind==='hit'){t.hit++;const caps=LS.get('caps',[]);caps.push({day:d,req:Math.max(1,(t.by.gemini||t.req)-1),model:LS.get('model','')});LS.set('caps',caps.slice(-20))}
  const keys=Object.keys(u).sort().slice(-30);const nu={};keys.forEach(k=>nu[k]=u[k]);LS.set('usage',nu);updUsage()}
 function learnedCap(){const caps=LS.get('caps',[]);if(!caps.length)return null;return Math.min(...caps.slice(-5).map(c=>c.req))}
-function updUsage(){const {u,d}=usage();const t=u[d];const cap=+LS.get('cap',0)||learnedCap()||0;const el=$('#uChip');
- if(cap){const left=Math.max(0,cap-t.req),pct=left/cap;el.textContent=`${left}/${cap} left`;el.style.background=pct>.4?'var(--panel)':pct>.15?'#7a5a12':'#7a2a22'}else el.textContent=`${t.req} used today`;
- if(t.hit)el.style.background='#7a2a22';
+function updUsage(){const {u,d}=usage();const t=u[d];t.by=t.by||{};const gReq=t.by.gemini||0;const cap=+LS.get('cap',0)||learnedCap()||0;const el=$('#uChip');
+ if(cap){const left=Math.max(0,cap-gReq),pct=left/cap;el.textContent=`${left}/${cap} left`;el.style.background=pct>.4?'var(--panel)':pct>.15?'#7a5a12':'#7a2a22'}else el.textContent=`${t.req} used today`;
+ const alive=typeof chain==='function'?chain():[];if(alive.length&&alive[0]!=='gemini'&&provKey('gemini')){el.textContent='Backup: '+PROV[alive[0]].label;el.style.background='#7a5a12'}if(!alive.length&&t.hit)el.style.background='#7a2a22';
  const now=new Date(),pt=new Date(now.toLocaleString('en-US',{timeZone:'America/Los_Angeles'}));const mins=(24*60)-(pt.getHours()*60+pt.getMinutes());
  const rows=Object.entries(u).sort().reverse().slice(0,7).map(([k,v])=>`<tr><td>${k===d?'Today':k}</td><td>${v.lessons}</td><td>${v.req}</td><td>${(v.tok/1000).toFixed(1)}k</td><td>${v.hit?'⚠ '+v.hit:'–'}</td></tr>`).join('');
  const lc=learnedCap();
  $('#uBody').innerHTML=`<div class="big">${t.req}${cap?' / '+cap:''}</div><small class="hint">AI requests today · ${t.lessons} lessons · ${(t.tok/1000).toFixed(1)}k tokens<br>Resets in ${Math.floor(mins/60)}h ${mins%60}m (midnight Pacific time)</small>
  <div class="meter"><i style="width:${cap?Math.min(100,t.req/cap*100):0}%"></i></div>
  ${lc?`<small class="hint">Google cut you off at <b>${lc}</b> requests before. That's your real daily limit.</small>`:`<small class="hint">No limit hit yet. When Google says "quota exceeded", Lycan records the count and shows that as your daily limit.</small>`}
- ${t.req&&t.lessons?`<small class="hint">≈ ${(t.req/t.lessons).toFixed(1)} requests per lesson${cap?` → about <b>${Math.floor(Math.max(0,cap-t.req)/(t.req/t.lessons))}</b> more lessons today`:''}.</small>`:''}
+ ${t.req&&t.lessons?`<small class="hint">≈ ${(t.req/t.lessons).toFixed(1)} requests per lesson (includes double-checks)${cap?` → about <b>${Math.floor(Math.max(0,cap-gReq)/(t.req/t.lessons))}</b> more lessons today`:''}.</small>`:''}
+ <div class="day">Providers today</div>${Object.keys(PROV).filter(p=>provKey(p)).map(p=>`<div class="item"><div class="t">${PROV[p].label}<small>${provModel(p)}</small></div><span>${t.by[p]||0} req ${LS.get('dead_'+p,'')===d?'· <b style="color:var(--red)">used up</b>':'· ✓ ready'}</span></div>`).join('')||'<small class="hint">No providers set.</small>'}
  <table class="ut"><tr><th>Day</th><th>Lessons</th><th>Requests</th><th>Tokens</th><th>Limit hit</th></tr>${rows}</table>`}
 async function pickModel(key){try{const r=await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200',{headers:{'x-goog-api-key':key}});const j=await r.json();
  const ok=(j.models||[]).filter(m=>(m.supportedGenerationMethods||[]).includes('generateContent')).map(m=>m.name.replace('models/','')).filter(n=>/^gemini-[\d.]+-flash$/.test(n)||/^gemini-[\d.]+-flash-latest$/.test(n)||n==='gemini-flash-latest');
  const ver=n=>parseFloat((n.match(/gemini-([\d.]+)/)||[0,0])[1]);ok.sort((a,b)=>ver(b)-ver(a));return ok.find(n=>!/latest/.test(n))||ok[0]||null}catch{return null}}
-async function askGemini(parts,retried){const key=LS.get('key','');if(!key){openSheet('sSet');throw new Error('Add your free Gemini API key first')}
- const model=LS.get('model','gemini-3.8-flash');
+// ---------- AI provider chain (auto-failover) ----------
+const PROV={
+ gemini:{label:'Gemini',kind:'gemini'},
+ groq:{label:'Groq',kind:'oai',url:'https://api.groq.com/openai/v1',def:'llama-3.3-70b-versatile'},
+ openrouter:{label:'OpenRouter',kind:'oai',url:'https://openrouter.ai/api/v1',def:'deepseek/deepseek-chat-v3-0324:free'},
+ cerebras:{label:'Cerebras',kind:'oai',url:'https://api.cerebras.ai/v1',def:'llama-3.3-70b'}};
+function provKey(p){return p==='gemini'?LS.get('key',''):LS.get('k_'+p,'')}
+function provModel(p){return p==='gemini'?LS.get('model','gemini-3.8-flash'):(LS.get('m_'+p,'')||PROV[p].def)}
+function chain(){return LS.get('order',['gemini','groq','openrouter','cerebras']).filter(p=>PROV[p]&&provKey(p)&&LS.get('dead_'+p,'')!==ptDay())}
+class QuotaErr extends Error{}class SoftErr extends Error{}
+async function callGemini(sys,contents,retried){const key=provKey('gemini'),model=provModel('gemini');
+ const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,{method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':key},body:JSON.stringify({system_instruction:{parts:[{text:sys}]},contents,generationConfig:{responseMimeType:'application/json',temperature:0.5}})});
+ const j=await r.json().catch(()=>({}));if(!r.ok){const m=j.error?.message||('HTTP '+r.status);
+  if(r.status===429||/quota|rate limit|exhausted/i.test(m)){const det=JSON.stringify(j.error?.details||'')+m;if(/PerMinute|per minute/i.test(det)&&!/PerDay|per day/i.test(det))throw new SoftErr('Gemini: too many requests this minute');track('hit','gemini');throw new QuotaErr('Gemini daily limit reached')}
+  if(!retried&&/model|not found|no longer|not supported/i.test(m)){const nm=await pickModel(key);if(nm&&nm!==model){LS.set('model',nm);return callGemini(sys,contents,true)}}
+  if(r.status>=500)throw new SoftErr('Gemini: '+m);throw new Error('Gemini: '+m)}
+ track('tok',j.usageMetadata?.totalTokenCount||0);return j.candidates?.[0]?.content?.parts?.map(p=>p.text||'').join('')||''}
+function toOAI(sys,contents){const msgs=[{role:'system',content:sys}];let dropped=0;
+ for(const c of contents){const parts=[];for(const p of c.parts){if(p.text)parts.push(p.text);else if(p.inline_data){dropped++;parts.push(p.inline_data.mime_type==='application/pdf'?(pdfText?`[STUDENT PAPER TEXT]\n${pdfText.slice(0,60000)}`:'[paper attached but not readable here]'):'[attachment: '+p.inline_data.mime_type+' — not visible to this model]')}}
+  msgs.push({role:c.role==='model'?'assistant':'user',content:parts.join('\n')})}
+ msgs.push({role:'user',content:'Reply with ONLY the JSON object, no other text.'});return{msgs,dropped}}
+async function callOAI(p,sys,contents){const P=PROV[p],{msgs}=toOAI(sys,contents);const h={'Content-Type':'application/json',Authorization:'Bearer '+provKey(p)};if(p==='openrouter'){h['HTTP-Referer']=location.origin;h['X-Title']='Lycan'}
+ const r=await fetch(P.url+'/chat/completions',{method:'POST',headers:h,body:JSON.stringify({model:provModel(p),messages:msgs,temperature:0.5,max_tokens:6000})});
+ const j=await r.json().catch(()=>({}));if(!r.ok||j.error){const m=j.error?.message||j.message||('HTTP '+r.status);if(r.status===429||/quota|rate|limit|exhausted|credits/i.test(m)){if(/day|daily|credits|free-models-per-day/i.test(m)){track('hit',p);throw new QuotaErr(P.label+' daily limit reached')}throw new SoftErr(P.label+': '+m)}
+  if(r.status>=500||r.status===408)throw new SoftErr(P.label+': '+m);throw new Error(P.label+': '+m)}
+ track('tok',j.usage?.total_tokens||0);return(j.choices?.[0]?.message?.content||'').replace(/<think>[\s\S]*?<\/think>/g,'')}
+function parseJSON(txt){if(!txt)return null;try{return JSON.parse(txt)}catch{}const m=txt.replace(/```json|```/g,'').match(/\{[\s\S]*\}/);try{return m?JSON.parse(m[0]):null}catch{return null}}
+let lastProv='';
+async function callAny(sys,contents,label){const c=chain();if(!c.length){openSheet('sSet');throw new Error(LS.get('key','')||c.length?'All AI providers are used up for today. Add another free key in ⚙ (Groq / OpenRouter / Cerebras).':'Add your free Gemini API key in ⚙ first')}
+ let lastErr;for(const p of c){for(let attempt=0;attempt<2;attempt++){try{setStatus(`${label} (${PROV[p].label})…`);track('req',p);
+   const txt=PROV[p].kind==='gemini'?await callGemini(sys,contents):await callOAI(p,sys,contents);const d=parseJSON(txt);if(!d)throw new SoftErr(PROV[p].label+' sent an unreadable reply');lastProv=p;return{d,txt}}
+  catch(e){lastErr=e;if(e instanceof QuotaErr){LS.set('dead_'+p,ptDay());updUsage();break}
+   if(e instanceof SoftErr||e instanceof TypeError){if(attempt===0){await sleep(e.message.includes('minute')?4000:1500);continue}break}break}}}
+ throw lastErr||new Error('AI request failed')}
+// ---------- Self-check loop ----------
+const CHECK=`You are a meticulous checker for a whiteboard tutor. You get the student's request and a DRAFT lesson (JSON).
+Silently re-solve the problem yourself first, then compare. Check every fact, number, calculation, formula, unit, sign, definition and logical step, and that the drawing layout rules are respected (x within 30..690, no overlapping items, coordinates numeric).
+Return ONLY JSON: {"ok": true|false, "issues": ["short description of each error found"], "lesson": {corrected full lesson with same schema: "title","steps":[{"say","ops"}]} }
+If the draft is fully correct, set ok=true and lesson may be omitted. If anything is wrong, set ok=false and return the complete corrected lesson.`;
+async function verify(sys,question,draft){const rounds=+LS.get('checks',1);let cur=draft;
+ for(let i=1;i<=rounds;i++){let res;try{res=(await callAny(CHECK+'\n\nThe tutor rules the lesson must follow:\n'+sys.slice(0,3500),[{role:'user',parts:[{text:'STUDENT REQUEST:\n'+question+'\n\nDRAFT LESSON:\n'+JSON.stringify(cur)}]}],`Double-checking ${i}/${rounds}`)).d}catch(e){console.warn('check skipped',e);break}
+  if(res.ok!==false||!res.lesson?.steps?.length){if(i===1)checkNote='✓ checked';break}
+  cur=res.lesson;checkNote=`✓ fixed ${res.issues?.length||1} issue${(res.issues?.length||1)>1?'s':''}`;console.log('checker issues',res.issues)}
+ return cur}
+let checkNote='';
+async function askGemini(parts){
  const contents=[...board.history,{role:'user',parts}];
  const sys=SYS+(board.defense?defSys():'');
  const ctxNote={text:`(Board already has content down to y=${Math.round(contentH())}. Your new y coordinates start at 0 and will be placed below it automatically.)`};
  if(board.history.length)contents[contents.length-1]={role:'user',parts:[ctxNote,...parts]};
  if(board.defense&&pdfData){contents[0]={...contents[0],parts:[{inline_data:{mime_type:'application/pdf',data:pdfData}},...contents[0].parts]}}
- track('req');const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,{method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':key},body:JSON.stringify({system_instruction:{parts:[{text:sys}]},contents,generationConfig:{responseMimeType:'application/json',temperature:0.6}})});
- const j=await r.json();if(!r.ok){const m=j.error?.message||('HTTP '+r.status);
-  if(r.status===429||/quota|rate limit|exhausted/i.test(m)){const det=JSON.stringify(j.error?.details||'')+m;
-   if(/PerMinute|per minute|PerDay/i.test(det)&&!/PerDay|per day/i.test(det)){usage().u&&0;throw new Error('Too many requests in a minute. Wait 60 seconds and try again.')}
-   track('hit');openSheet('sUse');throw new Error('Free daily limit reached for '+model+'. It resets at midnight Pacific time.')}
-  if(!retried&&/model|not found|no longer|not supported/i.test(m)){const nm=await pickModel(key);if(nm&&nm!==model){LS.set('model',nm);setStatus('Switched to '+nm+', retrying…');return askGemini(parts,true)}}
-  throw new Error(m)}
- track('tok',j.usageMetadata?.totalTokenCount||0);
- const txt=j.candidates?.[0]?.content?.parts?.map(p=>p.text||'').join('')||'';
- let data;try{data=JSON.parse(txt)}catch{const m=txt.match(/\{[\s\S]*\}/);data=m?JSON.parse(m[0]):null}
+ checkNote='';let {d:data,txt}=await callAny(sys,contents,'Lycan is thinking');
  if(!data||!data.steps)throw new Error('The AI reply could not be read. Try again.');
- // store compact history (no big binaries except first defense pdf handled above)
+ const q=parts.map(p=>p.text||(p.inline_data?'['+p.inline_data.mime_type+' attached]':'')).join(' ');
+ if(LS.get('verify',true)&&!board.defense)data=await verify(sys,q,data);
  board.history.push({role:'user',parts:parts.map(p=>p.text?p:{text:'[attached '+(p.inline_data?.mime_type||'file')+']'})});
- board.history.push({role:'model',parts:[{text:txt}]});
+ board.history.push({role:'model',parts:[{text:JSON.stringify(data)}]});
  return data}
 function normalizeOps(steps,off){for(const s of steps){s.ops=(s.ops||[]).filter(o=>o&&o.t).map(o=>{o={...o};const n=k=>{o[k]=+o[k]||0};
   if(o.t==='rect'&&o.w2==null&&o.w!=null&&o.h!=null&&o.w>12){o.w2=o.w;delete o.w}
@@ -280,7 +326,7 @@ async function ask(text,extra){if(playing){setStatus('Wait for the current expla
   if(board.ops.length&&label&&!board.defense){enqueue({say:'',ops:[{t:'line',x1:40,y1:off-35,x2:690,y2:off-35,c:'#2e4d3f',w:2}]})}
   if(board.ops.length&&label){enqueue({say:'',ops:[{t:'text',x:40,y:off,text:(board.defense?'You: ':'Q: ')+label.slice(0,140),size:22,c:'blue'}]})}
   const d=await askGemini(parts);track('lesson');if(!board.title||board.title==='New board')board.title=d.title||label.slice(0,40);
-  const base=off+(board.ops.length&&label?40:0);normalizeOps(d.steps,base);enqueue(...d.steps);setStatus('Explaining…');following=true;play()}
+  const base=off+(board.ops.length&&label?40:0);normalizeOps(d.steps,base);enqueue(...d.steps);setStatus('Explaining'+(lastProv?' ('+PROV[lastProv].label+')':'')+(checkNote?' · '+checkNote:'')+'…');following=true;play()}
  catch(e){setStatus('⚠ '+e.message);console.error(e)}finally{$('#send').disabled=false}}
 
 // ---------- Boards ----------
@@ -338,6 +384,7 @@ $('#bPdf').onclick=()=>{if(!board||!board.ops.length)return setStatus('Nothing t
  pdf.save((board.title||'lycan-board').replace(/[^\w\- ]/g,'')+'.pdf')};
 function drawOpOn(c,o){const keep=ctx;ctx=c;try{drawOp(o,1)}finally{ctx=keep}}
 
+async function extractPdf(ab){try{pdfjsLib.GlobalWorkerOptions.workerSrc='pdf.worker.min.js';const doc=await pdfjsLib.getDocument({data:new Uint8Array(ab.slice(0))}).promise;let out='';for(let i=1;i<=doc.numPages&&out.length<80000;i++){const pg=await doc.getPage(i);const tc=await pg.getTextContent();out+=`\n[p.${i}] `+tc.items.map(x=>x.str).join(' ')}return out}catch(e){console.warn(e);return ''}}
 // ---------- Inputs ----------
 function setStatus(s){$('#status').textContent=s}
 function clearAttach(){attach=null;$('#att').style.display='none'}
@@ -363,9 +410,9 @@ $('#bMic').onclick=async()=>{if(rec){rec.stop();return}
 function openSheet(id){$('#'+id).classList.add('open')}
 function closeSheets(){document.querySelectorAll('.sheet').forEach(s=>s.classList.remove('open'))}
 document.querySelectorAll('.sheet').forEach(s=>s.onclick=e=>{if(e.target===s)closeSheets()});
-$('#bSet').onclick=()=>{$('#cid').value=LS.get('cid','');updDrive();$('#key').value=LS.get('key','');$('#model').value=LS.get('model','gemini-3.8-flash');$('#rate').value=LS.get('rate',1);loadVoices&&loadVoices();openSheet('sSet')};
+$('#bSet').onclick=()=>{['groq','openrouter','cerebras'].forEach(p=>$('#k_'+p).value=LS.get('k_'+p,''));$('#verify').value=LS.get('verify',true)?String(LS.get('checks',1)):'0';$('#cid').value=LS.get('cid','');updDrive();$('#key').value=LS.get('key','');$('#model').value=LS.get('model','gemini-3.8-flash');$('#rate').value=LS.get('rate',1);loadVoices&&loadVoices();openSheet('sSet')};
 $('#gConnect').onclick=async()=>{LS.set('cid',$('#cid').value.trim());try{await getToken(true);setStatus('Google Drive connected ✓');if(board&&board.ops.length)saveBoard()}catch(e){setStatus('⚠ '+e.message)}};
-$('#saveSet').onclick=()=>{LS.set('cid',$('#cid').value.trim());LS.set('key',$('#key').value.trim());LS.set('model',$('#model').value.trim()||'gemini-3.8-flash');LS.set('voice',$('#voice').value);LS.set('rate',+$('#rate').value);closeSheets();setStatus('Saved')};
+$('#saveSet').onclick=()=>{['groq','openrouter','cerebras'].forEach(p=>{const v=$('#k_'+p).value.trim();if(v!==LS.get('k_'+p,''))LS.set('dead_'+p,'');LS.set('k_'+p,v)});const vv=+$('#verify').value;LS.set('verify',vv>0);if(vv)LS.set('checks',vv);if($('#key').value.trim()!==LS.get('key',''))LS.set('dead_gemini','');updUsage();LS.set('cid',$('#cid').value.trim());LS.set('key',$('#key').value.trim());LS.set('model',$('#model').value.trim()||'gemini-3.8-flash');LS.set('voice',$('#voice').value);LS.set('rate',+$('#rate').value);closeSheets();setStatus('Saved')};
 $('#autoModel').onclick=async()=>{const k=$('#key').value.trim();if(!k)return setStatus('Paste your key first');const n=await pickModel(k);if(n){$('#model').value=n;setStatus('Found '+n+' — tap Save')}else setStatus('⚠ Could not list models — check the key')};
 $('#uChip').onclick=()=>{$('#capIn').value=LS.get('cap','')||'';updUsage();openSheet('sUse')};
 $('#capSave').onclick=()=>{LS.set('cap',+$('#capIn').value||0);updUsage();closeSheets()};
@@ -373,7 +420,7 @@ $('#bHist').onclick=()=>{renderHist();openSheet('sHist')};
 $('#bNew').onclick=()=>{newBoard();setDefBadge()};
 $('#bDef').onclick=()=>openSheet('sDef');
 $('#pickPdf').onclick=()=>$('#fPdf').click();
-$('#fPdf').onchange=async e=>{const f=e.target.files[0];if(!f)return;if(f.size>18e6){setStatus('⚠ PDF too large (max ~15 MB)');return}pdfData=b64(await f.arrayBuffer());await idbSet('pdf',{name:f.name,data:pdfData});$('#pdfName').textContent='📄 '+f.name;e.target.value=''};
+$('#fPdf').onchange=async e=>{const f=e.target.files[0];if(!f)return;if(f.size>18e6){setStatus('⚠ PDF too large (max ~15 MB)');return}const ab=await f.arrayBuffer();pdfData=b64(ab);pdfText=await extractPdf(ab);await idbSet('pdf',{name:f.name,data:pdfData,text:pdfText});$('#pdfName').textContent='📄 '+f.name;e.target.value=''};
 $('#startDef').onclick=()=>{if(!pdfData){setStatus('Choose your paper PDF first');return}if(playing)return;newBoard();board.defense=true;board.title='Mock defense';LS.set('defense',{level:$('#strict').value});setDefBadge();closeSheets();
  ask('Start my mock defense. Briefly summarize my study on the board (problem, method flow, key variables, statistical test), then ask your first panel question.')};
 $('#stopDef').onclick=()=>{if(board)board.defense=false;setDefBadge();closeSheets()};
@@ -381,7 +428,7 @@ function setDefBadge(){const on=!!(board&&board.defense);$('#defbadge').style.di
 setInterval(()=>{if(board&&!board.defense)$('#q').placeholder=board.ops.length?'Ask a follow-up…':'Ask a question…'},1000);
 
 // ---------- Init ----------
-(async()=>{setMute();updUsage();setInterval(updUsage,60000);if(/2\.5/.test(LS.get('model','')))LS.set('model','gemini-3.8-flash');const p=await idbGet('pdf');if(p){pdfData=p.data;$('#pdfName').textContent='📄 '+p.name}
+(async()=>{setMute();updUsage();setInterval(updUsage,60000);if(/2\.5/.test(LS.get('model','')))LS.set('model','gemini-3.8-flash');const p=await idbGet('pdf');if(p){pdfData=p.data;pdfText=p.text||'';$('#pdfName').textContent='📄 '+p.name}
  if(defense)$('#strict').value=defense.level;newBoard();resize();
  if(!LS.get('key',''))setStatus('Tap ⚙ to add your free Gemini key');
  if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{})})();
