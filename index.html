@@ -100,7 +100,7 @@ a{color:var(--acc)}
   <input id="key" type="password" placeholder="Paste your key">
   <small class="hint">Get one free at <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a> → "Create API key". It stays only on this phone.</small>
   <label>Model</label>
-  <select id="model"><option>gemini-2.5-flash</option><option>gemini-2.5-flash-lite</option><option>gemini-2.5-pro</option></select>
+  <input id="model" list="models" placeholder="gemini-3.8-flash"><datalist id="models"><option>gemini-3.8-flash</option><option>gemini-3.8-flash-lite</option><option>gemini-3.8-pro</option></datalist><small class="hint">If Google says a model is retired, type the name it recommends here.</small>
   <label>Voice</label><select id="voice"></select>
   <label>Speech speed</label><input id="rate" type="range" min="0.7" max="1.5" step="0.1" value="1">
   <button class="btn" id="saveSet">Save</button>
@@ -136,10 +136,10 @@ let board=null; // {id,title,created,ops:[],history:[],defense}
 let queue=[]; // steps to play [{say,ops:[...]}]
 let playing=false,paused=false,muted=LS.get('muted',false),following=true;
 let cur=null; // {ops, idx, t}
-let camY=0,scale=1,attach=null,defense=LS.get('defense',null),pdfData=null;
+let camY=0,scale=1,offX=0,attach=null,defense=LS.get('defense',null),pdfData=null;
 const cv=$('#cv'),wrap=$('#wrap');let ctx=cv.getContext('2d');
 
-function resize(){const r=wrap.getBoundingClientRect(),d=devicePixelRatio||1;cv.width=r.width*d;cv.height=r.height*d;cv.style.width=r.width+'px';cv.style.height=r.height+'px';scale=r.width/W;draw()}
+function resize(){const r=wrap.getBoundingClientRect(),d=devicePixelRatio||1;cv.width=r.width*d;cv.height=r.height*d;cv.style.width=r.width+'px';cv.style.height=r.height+'px';scale=Math.min(r.width/W,Math.max(1,r.height/900));offX=(r.width-W*scale)/2;draw()}
 addEventListener('resize',resize);
 
 const COL={white:'#f4f1e6',yellow:'#f2c14e',blue:'#7cc4f0',red:'#ef7a6a',green:'#8fdc8f',pink:'#f5a3c7',orange:'#f5a35c'};
@@ -156,7 +156,7 @@ function drawOp(o,p){ctx.save();ctx.strokeStyle=ctx.fillStyle=col(o.c);ctx.lineW
  case'circle':{ctx.beginPath();ctx.arc(o.x,o.y,o.r,-Math.PI/2,-Math.PI/2+Math.PI*2*p);ctx.stroke();break}
  case'path':{const n=Math.max(1,Math.floor(o.pts.length*p));ctx.beginPath();o.pts.slice(0,n).forEach((q,i)=>i?ctx.lineTo(q[0],q[1]):ctx.moveTo(q[0],q[1]));ctx.stroke();break}}
  ctx.restore()}
-function draw(){const d=devicePixelRatio||1;ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,cv.width,cv.height);if(!board)return;ctx.setTransform(scale*d,0,0,scale*d,0,-camY*scale*d);for(const o of board.ops)drawOp(o,1);if(cur&&cur.idx<cur.ops.length)drawOp(cur.ops[cur.idx],cur.t)}
+function draw(){const d=devicePixelRatio||1;ctx.setTransform(1,0,0,1,0,0);ctx.clearRect(0,0,cv.width,cv.height);if(!board)return;ctx.setTransform(scale*d,0,0,scale*d,offX*d,-camY*scale*d);for(const o of board.ops)drawOp(o,1);if(cur&&cur.idx<cur.ops.length)drawOp(cur.ops[cur.idx],cur.t)}
 function viewH(){return wrap.clientHeight/scale}
 
 // ---------- Pan ----------
@@ -203,7 +203,7 @@ Colors: white, yellow, blue, red, green, pink, orange. Write math in plain reada
 Use 4-10 steps. Each "say" is 1-3 natural spoken sentences that match what is being drawn in that step. Draw headings, diagrams, labeled arrows, worked equations, boxes around key results. Be correct and concise.`;
 function defSys(){const lv=$('#strict').value||defense.level;return `\n\nDEFENSE MODE: You are a ${lv} on a research defense panel. The student's paper is attached. Your job is to rehearse their defense: ask probing panel questions about the research problem, gaps, hypotheses, methodology, sampling, variables, instruments, validity/reliability, statistical test choice, assumptions, results interpretation, limitations, and recommendations. Each turn: (1) briefly evaluate the student's latest answer if any (what was strong, what was weak or missing, what a panel would push on), drawing your critique on the board (e.g., diagram their method flow and mark weak points in red); (2) end with ONE specific next panel question, drawn in a yellow box labeled "Panel question". Quote or reference specific parts of their paper. Be honest, ${lv==='Supportive adviser'?'kind and encouraging':'rigorous and challenging'}.`}
 async function askGemini(parts){const key=LS.get('key','');if(!key){openSheet('sSet');throw new Error('Add your free Gemini API key first')}
- const model=LS.get('model','gemini-2.5-flash');
+ const model=LS.get('model','gemini-3.8-flash');
  const contents=[...board.history,{role:'user',parts}];
  const sys=SYS+(board.defense?defSys():'');
  const ctxNote={text:`(Board already has content down to y=${Math.round(contentH())}. Your new y coordinates start at 0 and will be placed below it automatically.)`};
@@ -283,8 +283,8 @@ $('#bMic').onclick=async()=>{if(rec){rec.stop();return}
 function openSheet(id){$('#'+id).classList.add('open')}
 function closeSheets(){document.querySelectorAll('.sheet').forEach(s=>s.classList.remove('open'))}
 document.querySelectorAll('.sheet').forEach(s=>s.onclick=e=>{if(e.target===s)closeSheets()});
-$('#bSet').onclick=()=>{$('#key').value=LS.get('key','');$('#model').value=LS.get('model','gemini-2.5-flash');$('#rate').value=LS.get('rate',1);loadVoices&&loadVoices();openSheet('sSet')};
-$('#saveSet').onclick=()=>{LS.set('key',$('#key').value.trim());LS.set('model',$('#model').value);LS.set('voice',$('#voice').value);LS.set('rate',+$('#rate').value);closeSheets();setStatus('Saved')};
+$('#bSet').onclick=()=>{$('#key').value=LS.get('key','');$('#model').value=LS.get('model','gemini-3.8-flash');$('#rate').value=LS.get('rate',1);loadVoices&&loadVoices();openSheet('sSet')};
+$('#saveSet').onclick=()=>{LS.set('key',$('#key').value.trim());LS.set('model',$('#model').value.trim()||'gemini-3.8-flash');LS.set('voice',$('#voice').value);LS.set('rate',+$('#rate').value);closeSheets();setStatus('Saved')};
 $('#bHist').onclick=()=>{renderHist();openSheet('sHist')};
 $('#bNew').onclick=()=>{newBoard();setDefBadge()};
 $('#bDef').onclick=()=>openSheet('sDef');
@@ -297,7 +297,7 @@ function setDefBadge(){const on=!!(board&&board.defense);$('#defbadge').style.di
 setInterval(()=>{if(board&&!board.defense)$('#q').placeholder=board.ops.length?'Ask a follow-up…':'Ask a question…'},1000);
 
 // ---------- Init ----------
-(async()=>{setMute();const p=await idbGet('pdf');if(p){pdfData=p.data;$('#pdfName').textContent='📄 '+p.name}
+(async()=>{setMute();if(/2\.5/.test(LS.get('model','')))LS.set('model','gemini-3.8-flash');const p=await idbGet('pdf');if(p){pdfData=p.data;$('#pdfName').textContent='📄 '+p.name}
  if(defense)$('#strict').value=defense.level;newBoard();resize();
  if(!LS.get('key',''))setStatus('Tap ⚙ to add your free Gemini key');
  if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{})})();
