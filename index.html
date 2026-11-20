@@ -51,12 +51,14 @@ canvas{display:block}
 small.hint{color:var(--muted);font-size:12px;line-height:1.4;display:block;margin-top:6px}
 a{color:var(--acc)}
 #defbadge{display:none;font-size:11px;background:var(--red);color:#14241d;border-radius:8px;padding:2px 6px;font-weight:600}
+.big{font-family:Caveat;font-size:54px;color:var(--chalk);line-height:1}.meter{height:10px;border-radius:6px;background:var(--bg);margin:10px 0;overflow:hidden}.meter i{display:block;height:100%;background:var(--acc)}.ut{width:100%;border-collapse:collapse;font-size:12px;margin-top:12px}.ut td,.ut th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left}.ut th{color:var(--muted);font-weight:600}#uChip{white-space:nowrap}
 </style>
 </head>
 <body>
 <div class="app">
 <header>
   <div class="logo"><img src="icon.svg" alt="">Lycan <span id="defbadge">DEFENSE</span></div>
+  <button class="chip" id="uChip" title="AI usage">0 used today</button>
   <button class="ib" id="bNew" title="New board">＋</button>
   <button class="ib" id="bHist" title="Saved boards">🗂</button>
   <button class="ib" id="bDef" title="Defense mode">🎓</button>
@@ -124,6 +126,14 @@ a{color:var(--acc)}
   <button class="btn ghost" id="stopDef">Turn off defense mode</button>
 </div></div>
 
+<div class="sheet" id="sUse"><div>
+  <h3>AI usage</h3>
+  <div id="uBody"></div>
+  <label>My daily request limit (optional)</label>
+  <input id="capIn" type="number" min="0" placeholder="Leave blank to learn it automatically">
+  <small class="hint">Your exact free limit is on <a href="https://aistudio.google.com/usage" target="_blank">aistudio.google.com/usage</a> (Rate limits). Type the requests-per-day number for your model here.</small>
+  <button class="btn" id="capSave">Save</button>
+</div></div>
 <div class="sheet" id="sHist"><div>
   <h3>Saved boards</h3>
   <div id="hist"></div>
@@ -213,6 +223,23 @@ Ops:
 Colors: white, yellow, blue, red, green, pink, orange. Write math in plain readable form (x², √, ≤, σ, μ, Σ etc).
 Use 4-10 steps. Each "say" is 1-3 natural spoken sentences that match what is being drawn in that step. Draw headings, diagrams, labeled arrows, worked equations, boxes around key results. Be correct and concise.`;
 function defSys(){const lv=$('#strict').value||defense.level;return `\n\nDEFENSE MODE: You are a ${lv} on a research defense panel. The student's paper is attached. Your job is to rehearse their defense: ask probing panel questions about the research problem, gaps, hypotheses, methodology, sampling, variables, instruments, validity/reliability, statistical test choice, assumptions, results interpretation, limitations, and recommendations. Each turn: (1) briefly evaluate the student's latest answer if any (what was strong, what was weak or missing, what a panel would push on), drawing your critique on the board (e.g., diagram their method flow and mark weak points in red); (2) end with ONE specific next panel question, drawn in a yellow box labeled "Panel question". Quote or reference specific parts of their paper. Be honest, ${lv==='Supportive adviser'?'kind and encouraging':'rigorous and challenging'}.`}
+// ---------- Usage tracker ----------
+function ptDay(){return new Date().toLocaleDateString('en-CA',{timeZone:'America/Los_Angeles'})} // Google free quota resets at midnight Pacific
+function usage(){const u=LS.get('usage',{});const d=ptDay();if(!u[d])u[d]={req:0,tok:0,lessons:0,hit:0};return{u,d}}
+function track(kind,n){const {u,d}=usage();const t=u[d];if(kind==='req')t.req++;if(kind==='tok')t.tok+=n||0;if(kind==='lesson')t.lessons++;if(kind==='hit'){t.hit++;const caps=LS.get('caps',[]);caps.push({day:d,req:Math.max(1,t.req-1),model:LS.get('model','')});LS.set('caps',caps.slice(-20))}
+ const keys=Object.keys(u).sort().slice(-30);const nu={};keys.forEach(k=>nu[k]=u[k]);LS.set('usage',nu);updUsage()}
+function learnedCap(){const caps=LS.get('caps',[]);if(!caps.length)return null;return Math.min(...caps.slice(-5).map(c=>c.req))}
+function updUsage(){const {u,d}=usage();const t=u[d];const cap=+LS.get('cap',0)||learnedCap()||0;const el=$('#uChip');
+ if(cap){const left=Math.max(0,cap-t.req),pct=left/cap;el.textContent=`${left}/${cap} left`;el.style.background=pct>.4?'var(--panel)':pct>.15?'#7a5a12':'#7a2a22'}else el.textContent=`${t.req} used today`;
+ if(t.hit)el.style.background='#7a2a22';
+ const now=new Date(),pt=new Date(now.toLocaleString('en-US',{timeZone:'America/Los_Angeles'}));const mins=(24*60)-(pt.getHours()*60+pt.getMinutes());
+ const rows=Object.entries(u).sort().reverse().slice(0,7).map(([k,v])=>`<tr><td>${k===d?'Today':k}</td><td>${v.lessons}</td><td>${v.req}</td><td>${(v.tok/1000).toFixed(1)}k</td><td>${v.hit?'⚠ '+v.hit:'–'}</td></tr>`).join('');
+ const lc=learnedCap();
+ $('#uBody').innerHTML=`<div class="big">${t.req}${cap?' / '+cap:''}</div><small class="hint">AI requests today · ${t.lessons} lessons · ${(t.tok/1000).toFixed(1)}k tokens<br>Resets in ${Math.floor(mins/60)}h ${mins%60}m (midnight Pacific time)</small>
+ <div class="meter"><i style="width:${cap?Math.min(100,t.req/cap*100):0}%"></i></div>
+ ${lc?`<small class="hint">Google cut you off at <b>${lc}</b> requests before. That's your real daily limit.</small>`:`<small class="hint">No limit hit yet. When Google says "quota exceeded", Lycan records the count and shows that as your daily limit.</small>`}
+ ${t.req&&t.lessons?`<small class="hint">≈ ${(t.req/t.lessons).toFixed(1)} requests per lesson${cap?` → about <b>${Math.floor(Math.max(0,cap-t.req)/(t.req/t.lessons))}</b> more lessons today`:''}.</small>`:''}
+ <table class="ut"><tr><th>Day</th><th>Lessons</th><th>Requests</th><th>Tokens</th><th>Limit hit</th></tr>${rows}</table>`}
 async function pickModel(key){try{const r=await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200',{headers:{'x-goog-api-key':key}});const j=await r.json();
  const ok=(j.models||[]).filter(m=>(m.supportedGenerationMethods||[]).includes('generateContent')).map(m=>m.name.replace('models/','')).filter(n=>/^gemini-[\d.]+-flash$/.test(n)||/^gemini-[\d.]+-flash-latest$/.test(n)||n==='gemini-flash-latest');
  const ver=n=>parseFloat((n.match(/gemini-([\d.]+)/)||[0,0])[1]);ok.sort((a,b)=>ver(b)-ver(a));return ok.find(n=>!/latest/.test(n))||ok[0]||null}catch{return null}}
@@ -223,10 +250,14 @@ async function askGemini(parts,retried){const key=LS.get('key','');if(!key){open
  const ctxNote={text:`(Board already has content down to y=${Math.round(contentH())}. Your new y coordinates start at 0 and will be placed below it automatically.)`};
  if(board.history.length)contents[contents.length-1]={role:'user',parts:[ctxNote,...parts]};
  if(board.defense&&pdfData){contents[0]={...contents[0],parts:[{inline_data:{mime_type:'application/pdf',data:pdfData}},...contents[0].parts]}}
- const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,{method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':key},body:JSON.stringify({system_instruction:{parts:[{text:sys}]},contents,generationConfig:{responseMimeType:'application/json',temperature:0.6}})});
+ track('req');const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,{method:'POST',headers:{'Content-Type':'application/json','x-goog-api-key':key},body:JSON.stringify({system_instruction:{parts:[{text:sys}]},contents,generationConfig:{responseMimeType:'application/json',temperature:0.6}})});
  const j=await r.json();if(!r.ok){const m=j.error?.message||('HTTP '+r.status);
+  if(r.status===429||/quota|rate limit|exhausted/i.test(m)){const det=JSON.stringify(j.error?.details||'')+m;
+   if(/PerMinute|per minute|PerDay/i.test(det)&&!/PerDay|per day/i.test(det)){usage().u&&0;throw new Error('Too many requests in a minute. Wait 60 seconds and try again.')}
+   track('hit');openSheet('sUse');throw new Error('Free daily limit reached for '+model+'. It resets at midnight Pacific time.')}
   if(!retried&&/model|not found|no longer|not supported/i.test(m)){const nm=await pickModel(key);if(nm&&nm!==model){LS.set('model',nm);setStatus('Switched to '+nm+', retrying…');return askGemini(parts,true)}}
   throw new Error(m)}
+ track('tok',j.usageMetadata?.totalTokenCount||0);
  const txt=j.candidates?.[0]?.content?.parts?.map(p=>p.text||'').join('')||'';
  let data;try{data=JSON.parse(txt)}catch{const m=txt.match(/\{[\s\S]*\}/);data=m?JSON.parse(m[0]):null}
  if(!data||!data.steps)throw new Error('The AI reply could not be read. Try again.');
@@ -248,7 +279,7 @@ async function ask(text,extra){if(playing){setStatus('Wait for the current expla
  try{const off=board.ops.length?contentH()+70:30;
   if(board.ops.length&&label&&!board.defense){enqueue({say:'',ops:[{t:'line',x1:40,y1:off-35,x2:690,y2:off-35,c:'#2e4d3f',w:2}]})}
   if(board.ops.length&&label){enqueue({say:'',ops:[{t:'text',x:40,y:off,text:(board.defense?'You: ':'Q: ')+label.slice(0,140),size:22,c:'blue'}]})}
-  const d=await askGemini(parts);if(!board.title||board.title==='New board')board.title=d.title||label.slice(0,40);
+  const d=await askGemini(parts);track('lesson');if(!board.title||board.title==='New board')board.title=d.title||label.slice(0,40);
   const base=off+(board.ops.length&&label?40:0);normalizeOps(d.steps,base);enqueue(...d.steps);setStatus('Explaining…');following=true;play()}
  catch(e){setStatus('⚠ '+e.message);console.error(e)}finally{$('#send').disabled=false}}
 
@@ -336,6 +367,8 @@ $('#bSet').onclick=()=>{$('#cid').value=LS.get('cid','');updDrive();$('#key').va
 $('#gConnect').onclick=async()=>{LS.set('cid',$('#cid').value.trim());try{await getToken(true);setStatus('Google Drive connected ✓');if(board&&board.ops.length)saveBoard()}catch(e){setStatus('⚠ '+e.message)}};
 $('#saveSet').onclick=()=>{LS.set('cid',$('#cid').value.trim());LS.set('key',$('#key').value.trim());LS.set('model',$('#model').value.trim()||'gemini-3.8-flash');LS.set('voice',$('#voice').value);LS.set('rate',+$('#rate').value);closeSheets();setStatus('Saved')};
 $('#autoModel').onclick=async()=>{const k=$('#key').value.trim();if(!k)return setStatus('Paste your key first');const n=await pickModel(k);if(n){$('#model').value=n;setStatus('Found '+n+' — tap Save')}else setStatus('⚠ Could not list models — check the key')};
+$('#uChip').onclick=()=>{$('#capIn').value=LS.get('cap','')||'';updUsage();openSheet('sUse')};
+$('#capSave').onclick=()=>{LS.set('cap',+$('#capIn').value||0);updUsage();closeSheets()};
 $('#bHist').onclick=()=>{renderHist();openSheet('sHist')};
 $('#bNew').onclick=()=>{newBoard();setDefBadge()};
 $('#bDef').onclick=()=>openSheet('sDef');
@@ -348,7 +381,7 @@ function setDefBadge(){const on=!!(board&&board.defense);$('#defbadge').style.di
 setInterval(()=>{if(board&&!board.defense)$('#q').placeholder=board.ops.length?'Ask a follow-up…':'Ask a question…'},1000);
 
 // ---------- Init ----------
-(async()=>{setMute();if(/2\.5/.test(LS.get('model','')))LS.set('model','gemini-3.8-flash');const p=await idbGet('pdf');if(p){pdfData=p.data;$('#pdfName').textContent='📄 '+p.name}
+(async()=>{setMute();updUsage();setInterval(updUsage,60000);if(/2\.5/.test(LS.get('model','')))LS.set('model','gemini-3.8-flash');const p=await idbGet('pdf');if(p){pdfData=p.data;$('#pdfName').textContent='📄 '+p.name}
  if(defense)$('#strict').value=defense.level;newBoard();resize();
  if(!LS.get('key',''))setStatus('Tap ⚙ to add your free Gemini key');
  if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{})})();
