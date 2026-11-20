@@ -10,6 +10,7 @@
 <link rel="apple-touch-icon" href="icon-512.png">
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@500;700&family=Inter:wght@400;600&display=swap" rel="stylesheet">
 <script src="jspdf.umd.min.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
 :root{--bg:#14241d;--board:#1f3a2e;--chalk:#f4f1e6;--ink:#e8e4d6;--muted:#9fb3a8;--acc:#f2c14e;--panel:#0f1c16;--line:#2e4d3f;--red:#ef7a6a}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -100,6 +101,11 @@ a{color:var(--acc)}
   <label>Gemini API key (free)</label>
   <input id="key" type="password" placeholder="Paste your key">
   <small class="hint">Get one free at <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a> → "Create API key". It stays only on this phone.</small>
+  <label>Google Drive storage</label>
+  <input id="cid" placeholder="Paste your Google OAuth Client ID (…apps.googleusercontent.com)">
+  <small class="hint" id="gState"></small>
+  <button class="btn ghost" id="gConnect">Connect Google Drive</button>
+  <small class="hint">Boards save in a “Lycan Whiteboards” folder, one subfolder per board. Lycan can only see files it created. One-time setup steps are in the app's README.</small>
   <label>Model</label>
   <input id="model" list="models" placeholder="gemini-3.8-flash"><datalist id="models"><option>gemini-3.8-flash</option><option>gemini-3.8-flash-lite</option><option>gemini-3.8-pro</option></datalist><small class="hint">Leave as is: if Google retires a model, Lycan finds a working one automatically.</small><button class="btn ghost" id="autoModel">Find best model for my key</button>
   <label>Voice</label><select id="voice"></select>
@@ -248,18 +254,50 @@ async function ask(text,extra){if(playing){setStatus('Wait for the current expla
 
 // ---------- Boards ----------
 function newBoard(){if(playing)return;board={id:Date.now().toString(36),title:'New board',created:Date.now(),ops:[],history:[],defense:false};camY=0;$('#empty').style.display='flex';draw();setStatus('Ready')}
-function saveBoard(){if(!board||!board.ops.length)return;const all=LS.get('boards',{});all[board.id]=board;if(!LS.set('boards',all)){// trim history if too big
- board.history=board.history.slice(-6);all[board.id]=board;LS.set('boards',all)}}
-function renderHist(){const all=Object.values(LS.get('boards',{})).sort((a,b)=>b.created-a.created);let last='',h='';
- if(!all.length)h='<small class="hint">No boards yet. They save automatically.</small>';
- for(const b of all){const d=new Date(b.created).toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'});if(d!==last){h+=`<div class="day">${d}</div>`;last=d}
-  h+=`<div class="item"><div class="t" data-o="${b.id}">${esc(b.title)}${b.defense?' 🎓':''}<small>${new Date(b.created).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</small></div><button class="ib" data-r="${b.id}" title="Replay">▶</button><button class="ib" data-d="${b.id}">🗑</button></div>`}
- $('#hist').innerHTML=h}
+// ---------- Google Drive storage ----------
+const DRIVE='https://www.googleapis.com/drive/v3',UP='https://www.googleapis.com/upload/drive/v3';
+let gTok=null,gExp=0,tokClient=null,rootId=null,listCache={};
+function gisReady(){return window.google&&google.accounts&&google.accounts.oauth2}
+function getToken(interactive){return new Promise((res,rej)=>{const cid=LS.get('cid','');if(!cid)return rej(new Error('Set up Google Drive in ⚙ first'));
+ if(gTok&&Date.now()<gExp-60000)return res(gTok);if(!gisReady())return rej(new Error('Google sign-in still loading, try again'));
+ tokClient=google.accounts.oauth2.initTokenClient({client_id:cid,scope:'https://www.googleapis.com/auth/drive.file',callback:r=>{if(r.error)return rej(new Error(r.error));gTok=r.access_token;gExp=Date.now()+r.expires_in*1000;LS.set('gConnected',true);updDrive();res(gTok)},error_callback:e=>rej(new Error(e.message||e.type||'Sign-in cancelled'))});
+ tokClient.requestAccessToken({prompt:interactive?'':'',login_hint:LS.get('gEmail','')||undefined})})}
+async function gfetch(url,opt={}){const t=await getToken();const r=await fetch(url,{...opt,headers:{...(opt.headers||{}),Authorization:'Bearer '+t}});if(r.status===401){gTok=null;return gfetch(url,opt)}if(!r.ok&&r.status!==204){let m='Drive error '+r.status;try{m=(await r.json()).error.message}catch{}throw new Error(m)}return r.status===204?null:r}
+async function findOrMake(name,parent,props){const q=`name='${name.replace(/'/g,"\\'")}' and mimeType='application/vnd.google-apps.folder' and trashed=false`+(parent?` and '${parent}' in parents`:` and 'root' in parents`);
+ const j=await(await gfetch(`${DRIVE}/files?q=${encodeURIComponent(q)}&fields=files(id)`)).json();if(j.files.length)return j.files[0].id;
+ const m=await(await gfetch(`${DRIVE}/files?fields=id`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,mimeType:'application/vnd.google-apps.folder',parents:parent?[parent]:undefined,appProperties:props})})).json();return m.id}
+async function root(){if(!rootId)rootId=await findOrMake('Lycan Whiteboards');return rootId}
+function multipart(meta,body,type){const b='lycan'+Math.random().toString(36).slice(2);return{headers:{'Content-Type':'multipart/related; boundary='+b},body:`--${b}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(meta)}\r\n--${b}\r\nContent-Type: ${type}\r\n\r\n${body}\r\n--${b}--`}}
+let saving=Promise.resolve();
+function saveBoard(){if(!board||!board.ops.length)return;const b=board;saving=saving.then(()=>saveToDrive(b)).catch(e=>setStatus('⚠ Not saved: '+e.message))}
+async function saveToDrive(b){if(!LS.get('cid','')){setStatus('Done — connect Google Drive in ⚙ to save boards');return}
+ setStatus('Saving to Google Drive…');const r=await root();
+ const stamp=new Date(b.created).toISOString().slice(0,16).replace('T',' ').replace(':','.');
+ const fname=`${stamp} — ${(b.title||'Board').replace(/[\\/:*?"<>|]/g,'').slice(0,60)}`;
+ if(!b.folderId){b.folderId=await(await gfetch(`${DRIVE}/files?fields=id`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:fname,mimeType:'application/vnd.google-apps.folder',parents:[r],appProperties:{lycan:'board',created:String(b.created),title:b.title||'',defense:b.defense?'1':''}})})).json().then(x=>x.id)}
+ else await gfetch(`${DRIVE}/files/${b.folderId}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:fname,appProperties:{title:b.title||''}})});
+ const data=JSON.stringify(b);
+ if(b.fileId)await gfetch(`${UP}/files/${b.fileId}?uploadType=media`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:data});
+ else{const mp=multipart({name:'board.json',parents:[b.folderId]},data,'application/json');b.fileId=(await(await gfetch(`${UP}/files?uploadType=multipart&fields=id`,{method:'POST',...mp})).json()).id;
+  await gfetch(`${UP}/files/${b.fileId}?uploadType=media`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})}
+ setStatus('Saved to Google Drive ✓')}
+async function renderHist(){const el=$('#hist');if(!LS.get('cid','')){el.innerHTML='<small class="hint">Connect Google Drive in ⚙ to save and see your boards.</small>';return}
+ el.innerHTML='<small class="hint">Loading from Google Drive…</small>';
+ try{const r=await root();const q=`'${r}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+  const j=await(await gfetch(`${DRIVE}/files?q=${encodeURIComponent(q)}&fields=files(id,name,appProperties,createdTime)&pageSize=200&orderBy=createdTime desc`)).json();
+  listCache={};let last='',h='';if(!j.files.length)h='<small class="hint">No boards yet. They save automatically to the “Lycan Whiteboards” folder in your Drive.</small>';
+  for(const f of j.files){const ap=f.appProperties||{};const c=+ap.created||Date.parse(f.createdTime);listCache[f.id]=f;const d=new Date(c).toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'});if(d!==last){h+=`<div class="day">${d}</div>`;last=d}
+   h+=`<div class="item"><div class="t" data-o="${f.id}">${esc(ap.title||f.name)}${ap.defense?' 🎓':''}<small>${new Date(c).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</small></div><button class="ib" data-r="${f.id}" title="Replay">▶</button><button class="ib" data-d="${f.id}" title="Delete">🗑</button></div>`}
+  el.innerHTML=h}catch(e){el.innerHTML='<small class="hint">⚠ '+esc(e.message)+'</small><button class="btn ghost" onclick="renderHist()">Try again</button>'}}
+async function loadBoard(folderId){const q=`'${folderId}' in parents and name='board.json' and trashed=false`;const j=await(await gfetch(`${DRIVE}/files?q=${encodeURIComponent(q)}&fields=files(id)`)).json();if(!j.files.length)throw new Error('Board file missing');
+ const b=await(await gfetch(`${DRIVE}/files/${j.files[0].id}?alt=media`)).json();b.folderId=folderId;b.fileId=j.files[0].id;return b}
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-$('#hist').onclick=e=>{const o=e.target.closest('[data-o]'),d=e.target.closest('[data-d]'),rp=e.target.closest('[data-r]');const all=LS.get('boards',{});
- if(d){delete all[d.dataset.d];LS.set('boards',all);renderHist()}
- if(rp&&!playing){board=all[rp.dataset.r];$('#empty').style.display='none';setDefBadge();closeSheets();replay();return}
- if(o&&!playing){board=all[o.dataset.o];camY=0;$('#empty').style.display='none';setDefBadge();closeSheets();draw();setStatus('Opened — ask a follow-up')}};
+$('#hist').onclick=async e=>{const o=e.target.closest('[data-o]'),d=e.target.closest('[data-d]'),rp=e.target.closest('[data-r]');
+ if(d){const id=d.dataset.d,name=listCache[id]?.appProperties?.title||listCache[id]?.name||'this board';if(!confirm(`Delete “${name}” from Google Drive? This can't be undone.`))return;
+  try{d.disabled=true;await gfetch(`${DRIVE}/files/${id}`,{method:'DELETE'});if(board&&board.folderId===id)newBoard();setStatus('Board deleted');renderHist()}catch(err){setStatus('⚠ '+err.message);d.disabled=false}return}
+ const id=(rp||o)?.dataset.r||(rp||o)?.dataset.o;if(!id||playing)return;
+ try{setStatus('Opening…');board=await loadBoard(id);camY=0;$('#empty').style.display='none';setDefBadge();closeSheets();if(rp)replay();else{draw();setStatus('Opened — ask a follow-up')}}catch(err){setStatus('⚠ '+err.message)}};
+function updDrive(){const c=!!gTok||LS.get('gConnected',false);$('#gState').textContent=LS.get('cid','')?(c?'✓ Connected — boards save to “Lycan Whiteboards” in your Drive':'Not signed in yet'):'Not set up';}
 
 // ---------- PDF export ----------
 $('#bPdf').onclick=()=>{if(!board||!board.ops.length)return setStatus('Nothing to export yet');
@@ -294,8 +332,9 @@ $('#bMic').onclick=async()=>{if(rec){rec.stop();return}
 function openSheet(id){$('#'+id).classList.add('open')}
 function closeSheets(){document.querySelectorAll('.sheet').forEach(s=>s.classList.remove('open'))}
 document.querySelectorAll('.sheet').forEach(s=>s.onclick=e=>{if(e.target===s)closeSheets()});
-$('#bSet').onclick=()=>{$('#key').value=LS.get('key','');$('#model').value=LS.get('model','gemini-3.8-flash');$('#rate').value=LS.get('rate',1);loadVoices&&loadVoices();openSheet('sSet')};
-$('#saveSet').onclick=()=>{LS.set('key',$('#key').value.trim());LS.set('model',$('#model').value.trim()||'gemini-3.8-flash');LS.set('voice',$('#voice').value);LS.set('rate',+$('#rate').value);closeSheets();setStatus('Saved')};
+$('#bSet').onclick=()=>{$('#cid').value=LS.get('cid','');updDrive();$('#key').value=LS.get('key','');$('#model').value=LS.get('model','gemini-3.8-flash');$('#rate').value=LS.get('rate',1);loadVoices&&loadVoices();openSheet('sSet')};
+$('#gConnect').onclick=async()=>{LS.set('cid',$('#cid').value.trim());try{await getToken(true);setStatus('Google Drive connected ✓');if(board&&board.ops.length)saveBoard()}catch(e){setStatus('⚠ '+e.message)}};
+$('#saveSet').onclick=()=>{LS.set('cid',$('#cid').value.trim());LS.set('key',$('#key').value.trim());LS.set('model',$('#model').value.trim()||'gemini-3.8-flash');LS.set('voice',$('#voice').value);LS.set('rate',+$('#rate').value);closeSheets();setStatus('Saved')};
 $('#autoModel').onclick=async()=>{const k=$('#key').value.trim();if(!k)return setStatus('Paste your key first');const n=await pickModel(k);if(n){$('#model').value=n;setStatus('Found '+n+' — tap Save')}else setStatus('⚠ Could not list models — check the key')};
 $('#bHist').onclick=()=>{renderHist();openSheet('sHist')};
 $('#bNew').onclick=()=>{newBoard();setDefBadge()};
